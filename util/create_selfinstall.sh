@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -x
+#set -x
 
 if [[ -f "$1" ]]; then
 	if grep --perl-regexp 'linux.+-shared.+\.tar.xz' <<<"$1"; then
