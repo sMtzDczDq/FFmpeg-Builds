@@ -2,7 +2,7 @@
 #set -x
 
 if [[ -f "$1" ]]; then
-	if grep --perl-regexp 'linux.+-shared.+\.tar.xz' <<<"$1"; then
+	if grep -q --perl-regexp 'linux.+-shared.+\.tar.xz' <<<"$1"; then
 		FFARCHIVE="$1"
 	else
 		printf 'This script only works for shared linux builds\n'
