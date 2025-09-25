@@ -1,0 +1,17 @@
+[*]
+# like -i=4
+root=true
+indent_style = space
+indent_size = 2
+
+shell_variant      = bash # --language-variant
+switch_case_indent = true  # --case-indent
+space_redirects    = true
+keep_padding       = false
+function_next_line = false # --func-next-line
+end_of_line        = lf
+insert_final_newline = true
+binary_next_line   = true
+
+[findandmediainfo]
+binary_next_line   = true
