@@ -20,9 +20,7 @@
 #   - Set FAST3_NO_HOST_NET=1 if your VM/docker setup rejects
 #     --driver-opt network=host (macOS Docker Desktop, Lima/Colima, many
 #     nested-virt setups). Falls back to default bridge networking.
-#   - Set FAST3_PARALLELISM=N to override buildkit parallelism (default: 4,
-#     capped from nproc). Cap is conservative because FFmpeg dep builds are
-#     fs-heavy and lock up virtualised disks above ~4 concurrent stages.
+#   - Set FAST3_PARALLELISM=N to override buildkit parallelism (default: nproc).
 #   - Set FAST3_KEEP_CACHES=0 to delete .cache/images/* on exit (default 1).
 #   - Disk: budget ~50 GB for .cache/ across a full four-image run.
 
@@ -47,11 +45,8 @@ ALL_TARGETS=(
 detect_parallelism() {
     local n
     n="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 2)"
-    # Cap at 4 by default: each FFmpeg dep compile is fs-heavy (lots of
-    # small objects, repeated tarball extraction) and on virtualised disks
-    # (qcow2, VMDK, etc.) more parallelism just thrashes the disk. Override
-    # via FAST3_PARALLELISM=N.
-    if [[ "$n" -gt 4 ]]; then n=4; fi
+    # Cap at a sensible value; 16 is plenty for FFmpeg dep builds.
+    if [[ "$n" -gt 16 ]]; then n=16; fi
     echo "$n"
 }
 
@@ -75,7 +70,6 @@ create_builder() {
 [worker.oci]
   max-parallelism = ${parallelism}
 EOF
-
     local -a driver_opts=(
         "env.BUILDKIT_STEP_LOG_MAX_SIZE=-1"
         "env.BUILDKIT_STEP_LOG_MAX_SPEED=-1"

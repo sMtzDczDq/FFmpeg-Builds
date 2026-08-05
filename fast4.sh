@@ -138,6 +138,21 @@ pull_gpl_bases() {
     done
 }
 
+# Clone fdk-aac once — it's the only nonfree-specific dep. The source is
+# mounted into the Docker build (via --mount) so it's available for compilation.
+prepare_fdk_aac_source() {
+    local src_dir="${PWD}/.cache/fdk-aac-src"
+    local commit="d8e6b1a3aa606c450241632b64b703f21ea31ce3"
+    if [[ -d "${src_dir}/.git" ]]; then
+        echo ">>> fdk-aac source already cloned (checked)"
+        return 0
+    fi
+    echo ">>> cloning fdk-aac source (commit ${commit}) to .cache/fdk-aac-src"
+    mkdir -p "${src_dir}"
+    git clone --filter=blob:none https://github.com/mstorsjo/fdk-aac.git "${src_dir}"
+    git -C "${src_dir}" checkout "${commit}"
+}
+
 check_disk() {
     local need_kb=20000000  # ~20 GB
     local avail_kb
@@ -230,7 +245,8 @@ build_overlay() {
 FROM ${PUBLIC_REGISTRY}/${PUBLIC_REPO}/${base_ref}
 
 # fdk-aac source — pinned commit matches scripts.d/50-fdk-aac.sh upstream.
-ARG FDK_AAC_COMMIT=d8e6b1a3aa606c450241632b64b703f21ea31ce3
+source scripts.d/50-fdk-aac.sh
+ARG FDK_AAC_COMMIT
 RUN --mount=src=.cache/fdk-aac-src,dst=/src,rw \
     set -eux; \
     if [[ ! -d /src/.git ]]; then \
@@ -331,6 +347,7 @@ main() {
     check_disk
     create_builder
     pull_gpl_bases
+    prepare_fdk_aac_source
 
     for entry in "${ALL_TARGETS[@]}"; do
         # shellcheck disable=SC2086
