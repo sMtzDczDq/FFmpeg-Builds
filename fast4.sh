@@ -10,7 +10,11 @@
 #   the --enable-nonfree / --enable-libfdk-aac configure flags.
 #
 #   For each nonfree target we:
-#     1. Pull linux64-gpl-shared:9.0 (or win64-gpl-shared:9.0).
+#     1. Pull linux64-gpl-shared-9.0:latest (or win64-gpl-shared-9.0:latest).
+#        Note the naming: BtbN encodes the FFmpeg version into the image
+#        NAME (e.g. linux64-gpl-shared-9.0), not the docker tag — every
+#        variant shares the `:latest` tag and is overwritten on each
+#        publish. See .github/workflows/build.yml:264,289.
 #     2. Build a thin overlay image that starts FROM that gpl-shared image,
 #        builds fdk-aac into /opt/ffbuild/, and bakes in the nonfree
 #        FF_CONFIGURE. This is the entire dep work — ~5 min instead of ~2 h.
@@ -42,7 +46,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 BUILDER_NAME="ffbuilder"
-FFVER="9.0"
+FFVER="8.1"
 PUBLIC_REGISTRY="ghcr.io"
 PUBLIC_REPO="btbn/ffmpeg-builds"
 
@@ -57,14 +61,17 @@ ALL_TARGETS=(
     "win64   nonfree"
 )
 
-# Map (target,variant) -> base gpl-shared image tag to pull from ghcr.io.
+# Map (target,variant) -> base gpl-shared image ref to pull from ghcr.io.
+# BtbN's published naming is `<target>-<variant>-<ffver>:latest`, e.g.
+# `linux64-gpl-shared-9.0:latest`. The FFmpeg version is part of the
+# image NAME, not the tag — every variant shares the `:latest` tag.
 # All four nonfree variants share a single gpl-shared base per target —
 # the difference is just the configure flags, baked into the overlay.
 declare -A GPL_BASE=(
-    ["linux64 nonfree"]="linux64-gpl-shared:${FFVER}"
-    ["linux64 nonfree-shared"]="linux64-gpl-shared:${FFVER}"
-    ["win64 nonfree"]="win64-gpl-shared:${FFVER}"
-    ["win64 nonfree-shared"]="win64-gpl-shared:${FFVER}"
+    ["linux64 nonfree"]="linux64-gpl-shared-${FFVER}:latest"
+    ["linux64 nonfree-shared"]="linux64-gpl-shared-${FFVER}:latest"
+    ["win64 nonfree"]="win64-gpl-shared-${FFVER}:latest"
+    ["win64 nonfree-shared"]="win64-gpl-shared-${FFVER}:latest"
 )
 
 detect_parallelism() {
@@ -115,10 +122,14 @@ EOF
 
 # Pull both gpl-shared base images once. Skipped silently if already present.
 # These are the bulk of the speedup — all 120 deps live in these layers.
+# BtbN's naming is `<target>-<variant>-<ffver>:latest` (version in the NAME,
+# not the tag — every variant shares the `:latest` tag), per
+# .github/workflows/build.yml:264,289.
 pull_gpl_bases() {
-    local img
-    for img in linux64-gpl-shared win64-gpl-shared; do
-        local ref="${PUBLIC_REGISTRY}/${PUBLIC_REPO}/${img}:${FFVER}"
+    local ref
+    for ref in \
+        "${PUBLIC_REGISTRY}/${PUBLIC_REPO}/linux64-gpl-shared-${FFVER}:latest" \
+        "${PUBLIC_REGISTRY}/${PUBLIC_REPO}/win64-gpl-shared-${FFVER}:latest"; do
         echo ">>> pulling $ref"
         if ! docker pull "$ref"; then
             echo "    WARNING: failed to pull $ref."
@@ -147,8 +158,9 @@ build_ff_configure() {
     local cfg
 
     # Common gpl-shared flags — must match what's in BtbN's published
-    # linux64-gpl-shared:9.0 / win64-gpl-shared:9.0 image so the deps it
-    # already has satisfy ./configure.
+    # linux64-gpl-shared-9.0 / win64-gpl-shared-9.0 image (or the closest
+    # published FFmpeg version if 9.0 isn't yet on the registry) so the
+    # deps it already has satisfy ./configure.
     cfg="--enable-gpl --enable-version3 --disable-debug --disable-w32threads --enable-pthreads"
     cfg+=" --enable-iconv --enable-zlib --enable-libxml2 --enable-libvmaf"
     cfg+=" --enable-fontconfig --enable-libharfbuzz --enable-libfreetype --enable-libfribidi"
