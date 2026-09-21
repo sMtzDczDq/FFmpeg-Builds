@@ -41,6 +41,9 @@
 #     --enable-shared --disable-static to FF_CONFIGURE on top of the same
 #     gpl-shared image, which is fine because /opt/ffbuild/ contains both
 #     static and shared libs in the gpl-shared image.
+#   - Each build is packaged into artifacts/ as
+#     ffmpeg-<version>-<target>-<variant>.zip (win) or .tar.xz (linux),
+#     matching build.sh's naming and layout.
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -343,6 +346,55 @@ EOF
         bash /build.sh
 }
 
+# Package the freshly built prefix into a compressed archive in artifacts/,
+# mirroring build.sh's naming: ffmpeg-<version>-<target>-<variant>.zip|.tar.xz
+# where <version> comes from FFmpeg's own ffbuild/version.sh (e.g.
+# n9.0.2-3-g...). The archive is produced inside the overlay image via a
+# docker run so GNU tar/xz and zip are guaranteed regardless of the host.
+package_output() {
+    local target=$1 variant=$2 key="${1}-${2}"
+    local overlay_tag="${PUBLIC_REGISTRY}/${PUBLIC_REPO}/${key}:${FFVER}"
+    local build_root=".cache/ffbuild-output/${key}"
+    local pkg_root=".cache/pkgroot/${key}"
+
+    local version
+    version="$(cd "${build_root}/ffmpeg" && ./ffbuild/version.sh .)" || return 1
+    local build_name="ffmpeg-${version}-${key}"
+
+    echo
+    echo ">>> packaging ${build_name}"
+
+    rm -rf "$pkg_root"
+    mkdir -p "$pkg_root/$build_name" artifacts
+    cp -a "${build_root}/prefix/." "$pkg_root/$build_name/"
+
+    # UID mapping (skip under rootless docker).
+    local -a uidargs=()
+    if ! docker info -f '{{println .SecurityOptions}}' | grep rootless >/dev/null 2>&1; then
+        uidargs=( -u "$(id -u):$(id -g)" )
+    fi
+    local tty_arg=""
+    [[ -t 1 ]] && tty_arg="-t"
+
+    local fname
+    if [[ "$target" == win* ]]; then
+        fname="${build_name}.zip"
+        docker run --rm -i $tty_arg "${uidargs[@]}" \
+            -v "${PWD}/artifacts":/out \
+            -v "${PWD}/${pkg_root}/${build_name}":/${build_name} \
+            -w / "$overlay_tag" zip -9 -r "/out/${fname}" "$build_name"
+    else
+        fname="${build_name}.tar.xz"
+        docker run --rm -i $tty_arg "${uidargs[@]}" \
+            -v "${PWD}/artifacts":/out \
+            -v "${PWD}/${pkg_root}/${build_name}":/${build_name} \
+            -w / "$overlay_tag" tar -I "xz -T0" -cf "/out/${fname}" "$build_name"
+    fi
+
+    rm -rf "$pkg_root"
+    echo ">>> artifact: ${PWD}/artifacts/${fname}"
+}
+
 cleanup_caches() {
     if [[ "${FAST3_KEEP_CACHES:-1}" == "1" ]]; then
         echo ">>> leaving .cache/ and the builder in place (FAST3_KEEP_CACHES=1)"
@@ -377,6 +429,7 @@ main() {
 
         build_overlay "$target" "$variant"
         run_ffmpeg_build "$target" "$variant"
+        package_output "$target" "$variant"
     done
 
     cleanup_caches
@@ -390,6 +443,9 @@ main() {
     echo ">>> ffmpeg binaries:"
     find .cache/ffbuild-output -name ffmpeg -o -name ffmpeg.exe 2>/dev/null \
         | sed 's/^/    /' || true
+    echo
+    echo ">>> artifacts:"
+    ls -lh artifacts/*.{zip,tar.xz} 2>/dev/null | sed 's/^/    /' || true
 }
 
 main "$@"
