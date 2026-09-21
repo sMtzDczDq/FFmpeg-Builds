@@ -209,16 +209,16 @@ pull_gpl_bases() {
 # mounted into the Docker build (via --mount) so it's available for compilation.
 prepare_fdk_aac_source() {
     local src_dir="${PWD}/.cache/fdk-aac-src"
-    # Extract the commit from the source script
+    # Extract the commit from the source script (the value is double-quoted in the file)
     local commit
-    commit="$(grep '^SCRIPT_COMMIT=' scripts.d/50-fdk-aac.sh | cut -d'=' -f2 | tr -d '\n')"
+    commit="$(grep '^SCRIPT_COMMIT=' scripts.d/50-fdk-aac.sh | cut -d'=' -f2 | tr -d '\n"')"
     if [[ -d "${src_dir}/.git" ]]; then
-        echo ">>> fdk-aac source already cloned (checked)"
-        return 0
+        echo ">>> fdk-aac source already cloned (re-pinning to ${commit})"
+    else
+        echo ">>> cloning fdk-aac source (commit ${commit}) to .cache/fdk-aac-src"
+        mkdir -p "${src_dir}"
+        git clone --filter=blob:none https://github.com/mstorsjo/fdk-aac.git "${src_dir}"
     fi
-    echo ">>> cloning fdk-aac source (commit ${commit}) to .cache/fdk-aac-src"
-    mkdir -p "${src_dir}"
-    git clone --filter=blob:none https://github.com/mstorsjo/fdk-aac.git "${src_dir}"
     git -C "${src_dir}" checkout "${commit}"
 }
 
