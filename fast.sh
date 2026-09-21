@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # fast.sh — build linux64-nonfree, linux64-nonfree-shared, win64-nonfree,
-# win64-nonfree-shared for FFmpeg 9.0 by reusing BtbN's prebuilt gpl-shared
-# images from ghcr.io instead of recompiling all 120 dependencies.
+# win64-nonfree-shared for the latest released FFmpeg by reusing BtbN's
+# prebuilt gpl-shared images from ghcr.io instead of recompiling all 120
+# dependencies. The release version is auto-detected from ffmpeg.org
+# (9.0.2 -> release branch 9.0); pin it with FAST_FFVER if needed.
 #
 # Strategy (Option A):
 #   The published gpl-shared images already contain the full toolchain AND
@@ -10,7 +12,7 @@
 #   the --enable-nonfree / --enable-libfdk-aac configure flags.
 #
 #   For each nonfree target we:
-#     1. Pull linux64-gpl-shared-9.0:latest (or win64-gpl-shared-9.0:latest).
+#     1. Pull linux64-gpl-shared-<ffver>:latest (or win64-gpl-shared-<ffver>:latest).
 #        Note the naming: BtbN encodes the FFmpeg version into the image
 #        NAME (e.g. linux64-gpl-shared-9.0), not the docker tag — every
 #        variant shares the `:latest` tag and is overwritten on each
@@ -20,7 +22,7 @@
 #        FF_CONFIGURE. This is the entire dep work — ~5 min instead of ~2 h.
 #     3. Run that overlay image to configure+build+install ffmpeg into
 #        /ffbuild/prefix and package the artifacts.
-#     4. Tag the running image as the final linux64-nonfree(-shared):9.0.
+#     4. Tag the running image as the final linux64-nonfree(-shared):<ffver>.
 #
 #   No 30-60 min crosstool-NG rebuild, no 120 dep rebuilds.
 #
@@ -30,6 +32,7 @@
 #   ./fast.sh win64 nonfree-shared # one specific target+variant
 #
 # Env vars:
+#   FAST_FFVER=x.y            Pin the FFmpeg release branch (default: detect newest from ffmpeg.org).
 #   FAST_NO_HOST_NET=1        Skip --driver-opt network=host.
 #   FAST_PARALLELISM=N        Override buildkit max-parallelism (cap 4).
 #   FAST_KEEP_CACHES=0        Delete .cache/ and the builder on exit.
@@ -49,7 +52,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 BUILDER_NAME="ffbuilder"
-FFVER="9.0"
+FFVER="9.0"  # fallback only — normally auto-detected in main()
 PUBLIC_REGISTRY="ghcr.io"
 PUBLIC_REPO="btbn/ffmpeg-builds"
 
@@ -70,12 +73,9 @@ ALL_TARGETS=(
 # image NAME, not the tag — every variant shares the `:latest` tag.
 # All four nonfree variants share a single gpl-shared base per target —
 # the difference is just the configure flags, baked into the overlay.
-declare -A GPL_BASE=(
-    ["linux64 nonfree"]="linux64-gpl-shared-${FFVER}:latest"
-    ["linux64 nonfree-shared"]="linux64-gpl-shared-${FFVER}:latest"
-    ["win64 nonfree"]="win64-gpl-shared-${FFVER}:latest"
-    ["win64 nonfree-shared"]="win64-gpl-shared-${FFVER}:latest"
-)
+# GPL_BASE is populated in main() once FFVER has been resolved, since its
+# values embed ${FFVER}.
+declare -A GPL_BASE=()
 
 detect_parallelism() {
     local n
@@ -123,6 +123,70 @@ EOF
     "${cmd[@]}"
 }
 
+# Numeric compare for dotted version strings (x.y.z) without relying on
+# `sort -V` (BSD sort on macOS lacks it). Returns 0 if $1 >= $2.
+ffver_ge() {
+    local i
+    local -a a b
+    IFS=. read -r -a a <<< "$1"
+    IFS=. read -r -a b <<< "$2"
+    for ((i = 0; i < ${#a[@]}; i++)); do
+        if (( ${a[$i]} > ${b[$i]:-0} )); then return 0; fi
+        if (( ${a[$i]} < ${b[$i]:-0} )); then return 1; fi
+    done
+    return 0
+}
+
+# Query ffmpeg.org's release listing for the newest FFmpeg release and
+# reduce it to the release-branch version that BtbN bakes into its image
+# names and upstream uses for the `release/x.y` git branch: 9.0.2 -> 9.0.
+detect_latest_ffver() {
+    local html v ver=""
+    local -a versions=()
+
+    html="$(curl -fsSL --max-time 30 https://ffmpeg.org/releases/ 2>/dev/null \
+        || wget -qO- --timeout=30 https://ffmpeg.org/releases/)" || return 1
+
+    while IFS= read -r v; do
+        [[ -n "$v" ]] && versions+=("$v")
+    done < <(printf '%s\n' "$html" \
+        | grep -oE 'ffmpeg-[0-9]+(\.[0-9]+){1,2}\.tar\.(xz|bz2)' \
+        | grep -oE '[0-9]+(\.[0-9]+){1,2}' \
+        | sort -u)
+
+    (( ${#versions[@]} == 0 )) && return 1
+    ver="${versions[0]}"
+    for v in "${versions[@]:1}"; do
+        if ffver_ge "$v" "$ver"; then ver="$v"; fi
+    done
+
+    # 9.0.2 -> 9.0 ; 10.0 -> 10.0 (strip any patch number).
+    echo "${ver%.*}"
+}
+
+# The fast lane can only build branches BtbN already publishes (the version
+# is baked into the published image NAME, so there's no way to build an
+# unreleased branch). Verify both target bases exist before burning hours.
+check_base_images() {
+    local t found=1
+    for t in linux64 win64; do
+        if docker buildx imagetools inspect \
+            "${PUBLIC_REGISTRY}/${PUBLIC_REPO}/${t}-gpl-shared-${FFVER}:latest" \
+            >/dev/null 2>&1; then
+            echo ">>> base image available: ${t}-gpl-shared-${FFVER}:latest"
+        else
+            echo "    WARNING: ${t}-gpl-shared-${FFVER}:latest not on the registry"
+            echo "    (BtbN may not have published that branch yet, or you're offline)."
+            found=0
+        fi
+    done
+    if (( found != 1 )); then
+        echo "    The fast lane can only build FFmpeg branches BtbN already publishes."
+        echo "    Wait for BtbN's CI, or pin a published branch: FAST_FFVER=9.0 ./fast.sh"
+        exit 1
+    fi
+}
+
 # Pull both gpl-shared base images once. Skipped silently if already present.
 # These are the bulk of the speedup — all 120 deps live in these layers.
 # BtbN's naming is `<target>-<variant>-<ffver>:latest` (version in the NAME,
@@ -146,7 +210,8 @@ pull_gpl_bases() {
 prepare_fdk_aac_source() {
     local src_dir="${PWD}/.cache/fdk-aac-src"
     # Extract the commit from the source script
-    local commit="$(grep '^SCRIPT_COMMIT=' scripts.d/50-fdk-aac.sh | cut -d'=' -f2 | tr -d '\n')"
+    local commit
+    commit="$(grep '^SCRIPT_COMMIT=' scripts.d/50-fdk-aac.sh | cut -d'=' -f2 | tr -d '\n')"
     if [[ -d "${src_dir}/.git" ]]; then
         echo ">>> fdk-aac source already cloned (checked)"
         return 0
@@ -177,9 +242,9 @@ build_ff_configure() {
     local cfg
 
     # Common gpl-shared flags — must match what's in BtbN's published
-    # linux64-gpl-shared-9.0 / win64-gpl-shared-9.0 image (or the closest
-    # published FFmpeg version if 9.0 isn't yet on the registry) so the
-    # deps it already has satisfy ./configure.
+    # linux64-gpl-shared-${FFVER} / win64-gpl-shared-${FFVER} image (i.e.
+    # the resolved release branch) so the deps it already has satisfy
+    # ./configure.
     cfg="--enable-gpl --enable-version3 --disable-debug --disable-w32threads --enable-pthreads"
     cfg+=" --enable-iconv --enable-zlib --enable-libxml2 --enable-libvmaf"
     cfg+=" --enable-fontconfig --enable-libharfbuzz --enable-libfreetype --enable-libfribidi"
@@ -338,7 +403,7 @@ EOF
     local tty_arg=""
     [[ -t 1 ]] && tty_arg="-t"
 
-    mkdir -p .cache/ffbuild-output/${target}-${variant}
+    mkdir -p ".cache/ffbuild-output/${target}-${variant}"
     docker run --rm -i $tty_arg "${uidargs[@]}" \
         -v "${PWD}/.cache/ffbuild-output/${target}-${variant}":/ffbuild \
         -v "${PWD}/${build_script}":/build.sh \
@@ -381,13 +446,13 @@ package_output() {
         fname="${build_name}.zip"
         docker run --rm -i $tty_arg "${uidargs[@]}" \
             -v "${PWD}/artifacts":/out \
-            -v "${PWD}/${pkg_root}/${build_name}":/${build_name} \
+            -v "${PWD}/${pkg_root}/${build_name}:/${build_name}" \
             -w / "$overlay_tag" zip -9 -r "/out/${fname}" "$build_name"
     else
         fname="${build_name}.tar.xz"
         docker run --rm -i $tty_arg "${uidargs[@]}" \
             -v "${PWD}/artifacts":/out \
-            -v "${PWD}/${pkg_root}/${build_name}":/${build_name} \
+            -v "${PWD}/${pkg_root}/${build_name}:/${build_name}" \
             -w / "$overlay_tag" tar -I "xz -T0" -cf "/out/${fname}" "$build_name"
     fi
 
@@ -410,7 +475,29 @@ main() {
     local only_variant="${2:-}"
 
     mkdir -p .cache
+
+    # Resolve which FFmpeg release branch to build. Default: the newest
+    # release on ffmpeg.org reduced to its release branch (9.0.2 -> 9.0),
+    # which is both BtbN's image-name version and upstream's release/x.y
+    # git branch. Pin it explicitly with FAST_FFVER to skip detection.
+    if [[ -n "${FAST_FFVER:-}" ]]; then
+        FFVER="$FAST_FFVER"
+        echo ">>> pinned FFmpeg release branch: ${FFVER} (FAST_FFVER)"
+    elif FFVER="$(detect_latest_ffver)"; then
+        echo ">>> latest FFmpeg release on ffmpeg.org: ${FFVER}"
+    else
+        echo ">>> WARNING: couldn't reach ffmpeg.org — using fallback ${FFVER} (set FAST_FFVER to pin)" >&2
+    fi
+
+    GPL_BASE=(
+        ["linux64 nonfree"]="linux64-gpl-shared-${FFVER}:latest"
+        ["linux64 nonfree-shared"]="linux64-gpl-shared-${FFVER}:latest"
+        ["win64 nonfree"]="win64-gpl-shared-${FFVER}:latest"
+        ["win64 nonfree-shared"]="win64-gpl-shared-${FFVER}:latest"
+    )
+
     check_disk
+    check_base_images
     create_builder
     pull_gpl_bases
     prepare_fdk_aac_source
@@ -445,6 +532,7 @@ main() {
         | sed 's/^/    /' || true
     echo
     echo ">>> artifacts:"
+    # shellcheck disable=SC2012  # human-readable summary; ls -lh sizes are the point
     ls -lh artifacts/*.{zip,tar.xz} 2>/dev/null | sed 's/^/    /' || true
 }
 
