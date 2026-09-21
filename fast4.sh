@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # fast4.sh — build linux64-nonfree, linux64-nonfree-shared, win64-nonfree,
-# win64-nonfree-shared for FFmpeg 8.1 by reusing BtbN's prebuilt gpl-shared
+# win64-nonfree-shared for FFmpeg 9.0 by reusing BtbN's prebuilt gpl-shared
 # images from ghcr.io instead of recompiling all 120 dependencies.
 #
 # Strategy (Option A):
@@ -10,9 +10,9 @@
 #   the --enable-nonfree / --enable-libfdk-aac configure flags.
 #
 #   For each nonfree target we:
-#     1. Pull linux64-gpl-shared-8.1:latest (or win64-gpl-shared-8.1:latest).
+#     1. Pull linux64-gpl-shared-9.0:latest (or win64-gpl-shared-9.0:latest).
 #        Note the naming: BtbN encodes the FFmpeg version into the image
-#        NAME (e.g. linux64-gpl-shared-8.1), not the docker tag — every
+#        NAME (e.g. linux64-gpl-shared-9.0), not the docker tag — every
 #        variant shares the `:latest` tag and is overwritten on each
 #        publish. See .github/workflows/build.yml:264,289.
 #     2. Build a thin overlay image that starts FROM that gpl-shared image,
@@ -20,7 +20,7 @@
 #        FF_CONFIGURE. This is the entire dep work — ~5 min instead of ~2 h.
 #     3. Run that overlay image to configure+build+install ffmpeg into
 #        /ffbuild/prefix and package the artifacts.
-#     4. Tag the running image as the final linux64-nonfree(-shared):8.1.
+#     4. Tag the running image as the final linux64-nonfree(-shared):9.0.
 #
 #   No 30-60 min crosstool-NG rebuild, no 120 dep rebuilds.
 #
@@ -46,7 +46,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 BUILDER_NAME="ffbuilder"
-FFVER="8.1"
+FFVER="9.0"
 PUBLIC_REGISTRY="ghcr.io"
 PUBLIC_REPO="btbn/ffmpeg-builds"
 
@@ -170,12 +170,12 @@ check_disk() {
 # dependency set that's already installed in the base), then adds --enable-
 # nonfree and --enable-libfdk-aac.
 build_ff_configure() {
-    local variant=$1
+    local target=$1 variant=$2
     local cfg
 
     # Common gpl-shared flags — must match what's in BtbN's published
-    # linux64-gpl-shared-8.1 / win64-gpl-shared-8.1 image (or the closest
-    # published FFmpeg version if 8.1 isn't yet on the registry) so the
+    # linux64-gpl-shared-9.0 / win64-gpl-shared-9.0 image (or the closest
+    # published FFmpeg version if 9.0 isn't yet on the registry) so the
     # deps it already has satisfy ./configure.
     cfg="--enable-gpl --enable-version3 --disable-debug --disable-w32threads --enable-pthreads"
     cfg+=" --enable-iconv --enable-zlib --enable-libxml2 --enable-libvmaf"
@@ -192,9 +192,9 @@ build_ff_configure() {
     cfg+=" --enable-lv2 --enable-libvpl --enable-openal --enable-liboapv"
     cfg+=" --enable-libopencore-amrnb --enable-libopencore-amrwb --enable-libopenh264"
     cfg+=" --enable-libopenjpeg --enable-libopenmpt --enable-librav1e"
-    cfg+=" --enable-librubberband --enable-schannel --enable-sdl2 --enable-libsnappy"
+    cfg+=" --enable-librubberband --enable-sdl2 --enable-libsnappy"
     cfg+=" --enable-libsoxr --enable-libsrt --enable-libsvtav1 --enable-libtwolame"
-    cfg+=" --enable-libuavs3d --disable-libdrm --enable-vaapi --enable-libvidstab"
+    cfg+=" --enable-libuavs3d --disable-libdrm --enable-libvidstab"
     cfg+=" --enable-libvvenc --disable-whisper --enable-libx264 --enable-libx265"
     cfg+=" --enable-libxavs2 --enable-libxvid --enable-libzimg --enable-libzvbi"
 
@@ -207,6 +207,17 @@ build_ff_configure() {
         cfg+=" --enable-shared --disable-static"
     else
         cfg+=" --disable-shared --enable-static"
+    fi
+
+    # Target-specific TLS backend / VA-API. schannel is Windows-only
+    # (scripts.d/50-schannel.sh) and vaapi + openssl are the Linux answers
+    # (scripts.d/50-vaapi, scripts.d/25-openssl.sh). BtbN's gpl-shared image
+    # ships openssl+vaapi on linux64 and schannel on win64, so enable each
+    # only where its dep actually exists.
+    if [[ "$target" == linux* ]]; then
+        cfg+=" --enable-openssl --enable-vaapi"
+    else
+        cfg+=" --enable-schannel"
     fi
 
     echo "$cfg"
@@ -229,7 +240,7 @@ build_overlay() {
     local dockerfile=".cache/Dockerfile.nonfree.${target}-${variant}"
     local ff_cfg
 
-    ff_cfg="$(build_ff_configure "$variant")"
+    ff_cfg="$(build_ff_configure "$target" "$variant")"
 
     mkdir -p .cache
     echo
