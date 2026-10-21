@@ -5,16 +5,15 @@
 #
 # Usage: create_selfinstall.sh artifacts/ffmpeg-*linux64-nonfree-shared-*.tar.xz
 #
-set -euo pipefail
-IFS=$'\n\t'
+set -e
 
 ARCHIVE="${1:-}"
 if [[ -z "$ARCHIVE" ]]; then
-    printf 'Usage: create_selfinstall.sh artifacts/ffmpeg-*linux64-nonfree-shared-*.tar.xz\n'
+    echo "Usage: create_selfinstall.sh artifacts/ffmpeg-*linux64-nonfree-shared-*.tar.xz"
     exit 1
 fi
 if [[ ! -f "$ARCHIVE" ]]; then
-    printf 'error: no such file: %s\n' "$ARCHIVE" >&2
+    echo "No such file: $ARCHIVE"
     exit 1
 fi
 # Only shared linux builds make sense here: the self-extractor unpacks the
@@ -24,15 +23,19 @@ fi
 # "-shared" is immediately followed by ".tar.xz", so this needs '.*' and
 # not '.+' between them.
 if [[ ! "$ARCHIVE" =~ linux.+-shared.*\.tar\.xz$ ]]; then
-    printf 'This script only works for shared linux builds\n'
+    echo "This script only works for shared linux builds"
     exit 1
 fi
 
 OUTPUTFILE="${ARCHIVE%.tar.xz}.sh"
 
+# The .pc files in the tarball already point at a relocatable prefix, so the
+# self-extractor only has to unpack and refresh the linker cache.
 SELFINSTALLTEMPLATE="#!/usr/bin/env bash
 # https://stackoverflow.com/a/29418549
 # a self-extracting script header
+
+set -e
 
 # determine the line number of this script where the payload begins
 PAYLOAD_LINE=\$(awk '/^__PAYLOAD_BELOW__/ {print NR + 1; exit 0; }' \"\$0\")
@@ -40,19 +43,6 @@ PAYLOAD_LINE=\$(awk '/^__PAYLOAD_BELOW__/ {print NR + 1; exit 0; }' \"\$0\")
 # use the tail command and the line number we just determined to skip
 # past this leading script code and pipe the payload to tar
 tail -n+\"\$PAYLOAD_LINE\" \"\$0\" | sudo tar --strip-components=1 --keep-directory-symlink --no-same-owner -xJv -C /usr/local
-
-# The .pc files were generated with --prefix=/ffbuild/prefix, a path that only
-# exists inside the build container. Point them at the real install prefix.
-for pc in /usr/local/lib/pkgconfig/*.pc; do
-    [ -f \"\$pc\" ] || continue
-    awk '
-        /^prefix=/     { print \"prefix=/usr/local\";           next }
-        /^libdir=/     { print \"libdir=/usr/local/lib\";        next }
-        /^includedir=/ { print \"includedir=/usr/local/include\"; next }
-        { print }
-    ' \"\$pc\" > \"\$pc.new\"
-    mv -f \"\$pc.new\" \"\$pc\"
-done
 
 sudo ldconfig
 

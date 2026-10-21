@@ -77,6 +77,14 @@ in `/usr/local/share`. Set `PREFIX` to install somewhere else:
 PREFIX=/opt/ffmpeg sudo -E ./install.sh
 ```
 
+The pkg-config files are rewritten while the package is built, so their
+`prefix` points at the package's own directory rather than at the
+`/ffbuild/prefix` path used inside the build container. They therefore work
+no matter where the package is unpacked — `/usr/local`, `/opt/ffmpeg`, or a
+build directory you are pointing `PKG_CONFIG_PATH` at. The private
+dependency list, which names libraries that are not part of the package,
+is stripped out.
+
 The same script handles the static and the shared package. For the shared
 one it also refreshes the linker cache (`ldconfig`) when the prefix is a
 system one such as `/usr/local`, so the new libraries are picked up

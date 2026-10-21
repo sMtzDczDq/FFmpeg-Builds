@@ -4,11 +4,14 @@
 #
 # Usage: install.sh INDIR OUTDIR
 #
-set -euo pipefail
-IFS=$'\n\t'
+# Expects the flattened layout produced by variants/linux-install-*.sh, i.e.
+# doc/, man/ and presets/ at the top level of the prefix. The .pc files in
+# that layout are already rewritten to a relocatable prefix.
+#
+set -e
 
-if (( $# != 2 )); then
-    printf 'Usage: install.sh INDIR OUTDIR\n'
+if [[ $# -ne 2 ]]; then
+    echo "Usage: install.sh INDIR OUTDIR"
     exit 1
 fi
 
@@ -33,12 +36,15 @@ cp -a "${INDIR}"/doc/* "${OUTDIR}"/doc
 mkdir -p "${OUTDIR}/man"
 cp -a "${INDIR}"/man/* "${OUTDIR}"/man
 
+mkdir -p "${OUTDIR}/presets"
+cp -a "${INDIR}"/presets/* "${OUTDIR}"/presets
+
 # Refresh the dynamic linker cache. Only root can write /etc/ld.so.cache, and
 # it is only useful when installing into a system library directory, so skip it
 # otherwise instead of failing with a confusing permission error.
-if (( EUID == 0 )); then
+if [[ $EUID -eq 0 ]]; then
     ldconfig
 else
-    printf 'Note: not running as root, skipping ldconfig.\n'
-    printf '      Add %s/lib to your linker search path if the libraries are not found.\n' "$OUTDIR"
+    echo "Note: not running as root, skipping ldconfig."
+    echo "      Add ${OUTDIR}/lib to your linker search path if the libraries are not found."
 fi
