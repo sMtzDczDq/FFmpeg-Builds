@@ -46,9 +46,13 @@
 #     static and shared libs in the gpl-shared image.
 #   - Each build is packaged into artifacts/ as
 #     ffmpeg-<version>-<target>-<variant>.zip (win) or .tar.xz (linux),
-#     matching build.sh's naming and layout.
+#     matching build.sh's naming and layout. The directory *inside* the
+#     archive is shortened to ffmpeg-<base-version> (e.g. ffmpeg-n9.0.2),
+#     and the Linux packages additionally contain an install.sh that installs
+#     the build into /usr/local.
 
 set -euo pipefail
+IFS=$'\n\t'
 cd "$(dirname "$0")"
 
 BUILDER_NAME="ffbuilder"
@@ -60,11 +64,12 @@ PUBLIC_REPO="btbn/ffmpeg-builds"
 # build (both pull from the same gpl-shared base image, so layer reuse is
 # high; build order doesn't actually matter for the build itself, only
 # for log readability).
+# Flat list of target/variant pairs, consumed two at a time.
 ALL_TARGETS=(
-    "linux64 nonfree-shared"
-    "linux64 nonfree"
-    "win64   nonfree-shared"
-    "win64   nonfree"
+    linux64   nonfree-shared
+    linux64   nonfree
+    win64     nonfree-shared
+    win64     nonfree
 )
 
 # Map (target,variant) -> base gpl-shared image ref to pull from ghcr.io.
@@ -79,22 +84,22 @@ declare -A GPL_BASE=()
 
 detect_parallelism() {
     local n
-    n="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 2)"
+    n="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || printf '%s\n' 2)"
     # Cap at 4 by default: each dep compile is fs-heavy and on virtualised
     # disks (qcow2/VMDK) more parallelism just thrashes the disk. Override
     # via FAST_PARALLELISM=N.
-    if [[ "$n" -gt 4 ]]; then n=4; fi
-    echo "$n"
+    if (( n > 4 )); then n=4; fi
+    printf '%s\n' "$n"
 }
 
 create_builder() {
     if docker buildx inspect "$BUILDER_NAME" >/dev/null 2>&1; then
-        echo ">>> buildx builder '$BUILDER_NAME' already exists, reusing"
+        printf '%s\n' ">>> buildx builder '$BUILDER_NAME' already exists, reusing"
         return 0
     fi
 
     local parallelism="${FAST_PARALLELISM:-$(detect_parallelism)}"
-    echo ">>> creating buildx builder '$BUILDER_NAME' (parallelism=$parallelism)"
+    printf '%s\n' ">>> creating buildx builder '$BUILDER_NAME' (parallelism=$parallelism)"
 
     local tmpcfg
     tmpcfg="$(mktemp --suffix=.toml)"
@@ -130,9 +135,14 @@ ffver_ge() {
     local -a a b
     IFS=. read -r -a a <<< "$1"
     IFS=. read -r -a b <<< "$2"
-    for ((i = 0; i < ${#a[@]}; i++)); do
-        if (( ${a[$i]} > ${b[$i]:-0} )); then return 0; fi
-        if (( ${a[$i]} < ${b[$i]:-0} )); then return 1; fi
+    # Compare over the longer of the two, otherwise 9.0 would wrongly be
+    # reported as >= 9.0.1.
+    local -i n=${#a[@]}
+    if (( ${#b[@]} > n )); then n=${#b[@]}; fi
+    for ((i = 0; i < n; i++)); do
+        # ${a[$i]:-0} — an unset element is an unbound variable under `set -u`.
+        if (( ${a[$i]:-0} > ${b[$i]:-0} )); then return 0; fi
+        if (( ${a[$i]:-0} < ${b[$i]:-0} )); then return 1; fi
     done
     return 0
 }
@@ -161,7 +171,7 @@ detect_latest_ffver() {
     done
 
     # 9.0.2 -> 9.0 ; 10.0 -> 10.0 (strip any patch number).
-    echo "${ver%.*}"
+    printf '%s\n' "${ver%.*}"
 }
 
 # The fast lane can only build branches BtbN already publishes (the version
@@ -173,16 +183,16 @@ check_base_images() {
         if docker buildx imagetools inspect \
             "${PUBLIC_REGISTRY}/${PUBLIC_REPO}/${t}-gpl-shared-${FFVER}:latest" \
             >/dev/null 2>&1; then
-            echo ">>> base image available: ${t}-gpl-shared-${FFVER}:latest"
+            printf '%s\n' ">>> base image available: ${t}-gpl-shared-${FFVER}:latest"
         else
-            echo "    WARNING: ${t}-gpl-shared-${FFVER}:latest not on the registry"
-            echo "    (BtbN may not have published that branch yet, or you're offline)."
+            printf '%s\n' "    WARNING: ${t}-gpl-shared-${FFVER}:latest not on the registry"
+            printf '%s\n' "    (BtbN may not have published that branch yet, or you're offline)."
             found=0
         fi
     done
-    if (( found != 1 )); then
-        echo "    The fast lane can only build FFmpeg branches BtbN already publishes."
-        echo "    Wait for BtbN's CI, or pin a published branch: FAST_FFVER=9.0 ./fast.sh"
+    if (( ! found )); then
+        printf '%s\n' "    The fast lane can only build FFmpeg branches BtbN already publishes."
+        printf '%s\n' "    Wait for BtbN's CI, or pin a published branch: FAST_FFVER=9.0 ./fast.sh"
         exit 1
     fi
 }
@@ -197,10 +207,10 @@ pull_gpl_bases() {
     for ref in \
         "${PUBLIC_REGISTRY}/${PUBLIC_REPO}/linux64-gpl-shared-${FFVER}:latest" \
         "${PUBLIC_REGISTRY}/${PUBLIC_REPO}/win64-gpl-shared-${FFVER}:latest"; do
-        echo ">>> pulling $ref"
+        printf '%s\n' ">>> pulling $ref"
         if ! docker pull "$ref"; then
-            echo "    WARNING: failed to pull $ref."
-            echo "    If you are behind an auth proxy, run 'docker login ${PUBLIC_REGISTRY}' and retry."
+            printf '%s\n' "    WARNING: failed to pull $ref."
+            printf '%s\n' "    If you are behind an auth proxy, run 'docker login ${PUBLIC_REGISTRY}' and retry."
         fi
     done
 }
@@ -213,9 +223,9 @@ prepare_fdk_aac_source() {
     local commit
     commit="$(grep '^SCRIPT_COMMIT=' scripts.d/50-fdk-aac.sh | cut -d'=' -f2 | tr -d '\n"')"
     if [[ -d "${src_dir}/.git" ]]; then
-        echo ">>> fdk-aac source already cloned (re-pinning to ${commit})"
+        printf '%s\n' ">>> fdk-aac source already cloned (re-pinning to ${commit})"
     else
-        echo ">>> cloning fdk-aac source (commit ${commit}) to .cache/fdk-aac-src"
+        printf '%s\n' ">>> cloning fdk-aac source (commit ${commit}) to .cache/fdk-aac-src"
         mkdir -p "${src_dir}"
         git clone --filter=blob:none https://github.com/mstorsjo/fdk-aac.git "${src_dir}"
     fi
@@ -225,11 +235,13 @@ prepare_fdk_aac_source() {
 check_disk() {
     local need_kb=20000000  # ~20 GB
     local avail_kb
-    avail_kb="$(df -Pk "${PWD}/.cache" 2>/dev/null | awk 'NR==2 {print $4}')"
+    # `|| true` — df fails if .cache does not exist yet, and with pipefail
+    # that would abort the script under `set -e`.
+    avail_kb="$(df -Pk "${PWD}/.cache" 2>/dev/null | awk 'NR==2 {print $4}' || true)"
     if [[ -z "$avail_kb" ]]; then return 0; fi
     if (( avail_kb < need_kb )); then
-        echo ">>> WARNING: only ${avail_kb} KB free in $(dirname "${PWD}/.cache")"
-        echo "    (recommended: >= $((need_kb/1000000)) GB). Continuing anyway."
+        printf '%s\n' ">>> WARNING: only ${avail_kb} KB free in $(dirname "${PWD}/.cache")"
+        printf '%s\n' "    (recommended: >= $((need_kb/1000000)) GB). Continuing anyway."
     fi
 }
 
@@ -238,7 +250,7 @@ check_disk() {
 # dependency set that's already installed in the base), then adds --enable-
 # nonfree and --enable-libfdk-aac.
 build_ff_configure() {
-    local target=$1 variant=$2
+    local target="$1" variant="$2"
     local cfg
 
     # Common gpl-shared flags — must match what's in BtbN's published
@@ -288,7 +300,7 @@ build_ff_configure() {
         cfg+=" --enable-schannel"
     fi
 
-    echo "$cfg"
+    printf '%s\n' "$cfg"
 }
 
 # Build the overlay image for a (target, variant). This:
@@ -301,7 +313,7 @@ build_ff_configure() {
 # Writes the overlay Dockerfile to .cache/Dockerfile.nonfree.<target>-<variant>
 # so it's inspectable after the run.
 build_overlay() {
-    local target=$1 variant=$2
+    local target="$1" variant="$2"
     local key="${target} ${variant}"
     local base_ref="${GPL_BASE[$key]}"
     local overlay_tag="${PUBLIC_REGISTRY}/${PUBLIC_REPO}/${target}-${variant}:${FFVER}"
@@ -311,15 +323,19 @@ build_overlay() {
     ff_cfg="$(build_ff_configure "$target" "$variant")"
 
     mkdir -p .cache
-    echo
-    echo "============================================================"
-    echo "  Building overlay: ${target} ${variant} (FFmpeg ${FFVER})"
-    echo "  Base: ${PUBLIC_REGISTRY}/${PUBLIC_REPO}/${base_ref}"
-    echo "  Tag:  ${overlay_tag}"
-    echo "============================================================"
+    printf '\n'
+    printf '%s\n' "============================================================"
+    printf '%s\n' "  Building overlay: ${target} ${variant} (FFmpeg ${FFVER})"
+    printf '%s\n' "  Base: ${PUBLIC_REGISTRY}/${PUBLIC_REPO}/${base_ref}"
+    printf '%s\n' "  Tag:  ${overlay_tag}"
+    printf '%s\n' "============================================================"
 
     # Extract the fdk-aac commit from the source script without hardcoding it
-FDK_AAC_COMMIT="$(grep '^SCRIPT_COMMIT=' scripts.d/50-fdk-aac.sh | cut -d'=' -f2 | tr -d '\n"' | tr -d '"')"
+    local fdk_aac_commit
+    if ! fdk_aac_commit="$(grep '^SCRIPT_COMMIT=' scripts.d/50-fdk-aac.sh | cut -d'=' -f2 | tr -d '\n"')"; then
+        printf 'error: could not read SCRIPT_COMMIT from scripts.d/50-fdk-aac.sh\n' >&2
+        return 1
+    fi
 
     cat >"$dockerfile" <<EOF
 # Auto-generated by fast.sh — do not edit.
@@ -355,7 +371,7 @@ ENV FF_CONFIGURE="${ff_cfg}" \\
 EOF
 
     docker buildx --builder "$BUILDER_NAME" build \
-        --build-arg FDK_AAC_COMMIT="$FDK_AAC_COMMIT" \
+        --build-arg FDK_AAC_COMMIT="$fdk_aac_commit" \
         --cache-from "type=registry,ref=${PUBLIC_REGISTRY}/${PUBLIC_REPO}/${base_ref}" \
         --cache-to   "type=local,mode=max,dest=.cache/${overlay_tag//\//_}" \
         --load --tag "$overlay_tag" \
@@ -367,19 +383,19 @@ EOF
 # build.sh does for the upstream-generated Dockerfile, but skips the host-
 # side vars.sh/variants dance because FF_CONFIGURE is already baked in.
 run_ffmpeg_build() {
-    local target=$1 variant=$2
+    local target="$1" variant="$2"
     local overlay_tag="${PUBLIC_REGISTRY}/${PUBLIC_REPO}/${target}-${variant}:${FFVER}"
     local build_script=".cache/build-ffmpeg.${target}-${variant}.sh"
 
-    echo
-    echo ">>> building ffmpeg inside $overlay_tag"
+    printf '\n'
+    printf '%s\n' ">>> building ffmpeg inside $overlay_tag"
 
     # Pick the right FFmpeg branch matching the addin.
     local git_branch="release/${FFVER}"
 
     cat >"$build_script" <<EOF
-#!/bin/bash
-set -xe
+#!/usr/bin/env bash
+set -euxo pipefail
 cd /ffbuild
 rm -rf ffmpeg prefix
 
@@ -400,11 +416,13 @@ EOF
     if ! docker info -f '{{println .SecurityOptions}}' | grep rootless >/dev/null 2>&1; then
         uidargs=( -u "$(id -u):$(id -g)" )
     fi
-    local tty_arg=""
-    [[ -t 1 ]] && tty_arg="-t"
+    local -a tty_args=()
+    if [[ -t 1 ]]; then
+        tty_args=( -t )
+    fi
 
     mkdir -p ".cache/ffbuild-output/${target}-${variant}"
-    docker run --rm -i $tty_arg "${uidargs[@]}" \
+    docker run --rm -i "${tty_args[@]}" "${uidargs[@]}" \
         -v "${PWD}/.cache/ffbuild-output/${target}-${variant}":/ffbuild \
         -v "${PWD}/${build_script}":/build.sh \
         "$overlay_tag" \
@@ -416,56 +434,69 @@ EOF
 # where <version> comes from FFmpeg's own ffbuild/version.sh (e.g.
 # n9.0.2-3-g...). The archive is produced inside the overlay image via a
 # docker run so GNU tar/xz and zip are guaranteed regardless of the host.
+# The directory inside the archive is shortened to ffmpeg-<base-version>.
 package_output() {
-    local target=$1 variant=$2 key="${1}-${2}"
+    local target="$1" variant="$2" key="${1}-${2}"
     local overlay_tag="${PUBLIC_REGISTRY}/${PUBLIC_REPO}/${key}:${FFVER}"
     local build_root=".cache/ffbuild-output/${key}"
     local pkg_root=".cache/pkgroot/${key}"
 
     local version
     version="$(cd "${build_root}/ffmpeg" && ./ffbuild/version.sh .)" || return 1
+    # The archive keeps the full name (version + target + variant), but the
+    # directory inside it is shortened to just the version (ffmpeg-n9.0.2) so
+    # that unpacking doesn't create an unwieldy directory.
     local build_name="ffmpeg-${version}-${key}"
+    local pkg_dir="ffmpeg-${version%%-*}"
 
-    echo
-    echo ">>> packaging ${build_name}"
+    printf '\n'
+    printf '%s\n' ">>> packaging ${build_name} (dir: ${pkg_dir})"
 
     rm -rf "$pkg_root"
-    mkdir -p "$pkg_root/$build_name" artifacts
-    cp -a "${build_root}/prefix/." "$pkg_root/$build_name/"
+    mkdir -p "$pkg_root/$pkg_dir" artifacts
+    cp -a "${build_root}/prefix/." "$pkg_root/$pkg_dir/"
+
+    # Linux packages ship an installer so the build can be dropped into
+    # /usr/local without unpacking the tree by hand.
+    if [[ "$target" == linux* ]]; then
+        install -m 0755 fast-install.sh "$pkg_root/$pkg_dir/install.sh"
+    fi
 
     # UID mapping (skip under rootless docker).
     local -a uidargs=()
     if ! docker info -f '{{println .SecurityOptions}}' | grep rootless >/dev/null 2>&1; then
         uidargs=( -u "$(id -u):$(id -g)" )
     fi
-    local tty_arg=""
-    [[ -t 1 ]] && tty_arg="-t"
+    local -a tty_args=()
+    if [[ -t 1 ]]; then
+        tty_args=( -t )
+    fi
 
     local fname
     if [[ "$target" == win* ]]; then
         fname="${build_name}.zip"
-        docker run --rm -i $tty_arg "${uidargs[@]}" \
+        docker run --rm -i "${tty_args[@]}" "${uidargs[@]}" \
             -v "${PWD}/artifacts":/out \
-            -v "${PWD}/${pkg_root}/${build_name}:/${build_name}" \
-            -w / "$overlay_tag" zip -9 -r "/out/${fname}" "$build_name"
+            -v "${PWD}/${pkg_root}/${pkg_dir}:/${pkg_dir}" \
+            -w / "$overlay_tag" zip -9 -r "/out/${fname}" "$pkg_dir"
     else
         fname="${build_name}.tar.xz"
-        docker run --rm -i $tty_arg "${uidargs[@]}" \
+        docker run --rm -i "${tty_args[@]}" "${uidargs[@]}" \
             -v "${PWD}/artifacts":/out \
-            -v "${PWD}/${pkg_root}/${build_name}:/${build_name}" \
-            -w / "$overlay_tag" tar -I "xz -T0" -cf "/out/${fname}" "$build_name"
+            -v "${PWD}/${pkg_root}/${pkg_dir}:/${pkg_dir}" \
+            -w / "$overlay_tag" tar -I "xz -T0" -cf "/out/${fname}" "$pkg_dir"
     fi
 
     rm -rf "$pkg_root"
-    echo ">>> artifact: ${PWD}/artifacts/${fname}"
+    printf '%s\n' ">>> artifact: ${PWD}/artifacts/${fname}"
 }
 
 cleanup_caches() {
     if [[ "${FAST_KEEP_CACHES:-1}" == "1" ]]; then
-        echo ">>> leaving .cache/ and the builder in place (FAST_KEEP_CACHES=1)"
+        printf '%s\n' ">>> leaving .cache/ and the builder in place (FAST_KEEP_CACHES=1)"
         return 0
     fi
-    echo ">>> removing .cache/ and the buildkit builder"
+    printf '%s\n' ">>> removing .cache/ and the buildkit builder"
     rm -rf "${PWD}/.cache" || true
     docker buildx rm -f "$BUILDER_NAME" 2>/dev/null || true
 }
@@ -482,11 +513,11 @@ main() {
     # git branch. Pin it explicitly with FAST_FFVER to skip detection.
     if [[ -n "${FAST_FFVER:-}" ]]; then
         FFVER="$FAST_FFVER"
-        echo ">>> pinned FFmpeg release branch: ${FFVER} (FAST_FFVER)"
+        printf '%s\n' ">>> pinned FFmpeg release branch: ${FFVER} (FAST_FFVER)"
     elif FFVER="$(detect_latest_ffver)"; then
-        echo ">>> latest FFmpeg release on ffmpeg.org: ${FFVER}"
+        printf '%s\n' ">>> latest FFmpeg release on ffmpeg.org: ${FFVER}"
     else
-        echo ">>> WARNING: couldn't reach ffmpeg.org — using fallback ${FFVER} (set FAST_FFVER to pin)" >&2
+        printf '%s\n' ">>> WARNING: couldn't reach ffmpeg.org — using fallback ${FFVER} (set FAST_FFVER to pin)" >&2
     fi
 
     GPL_BASE=(
@@ -502,10 +533,10 @@ main() {
     pull_gpl_bases
     prepare_fdk_aac_source
 
-    for entry in "${ALL_TARGETS[@]}"; do
-        # shellcheck disable=SC2086
-        set -- $entry
-        local target=$1 variant=$2
+    local -i i
+    for ((i = 0; i < ${#ALL_TARGETS[@]}; i += 2)); do
+        local target="${ALL_TARGETS[$i]}"
+        local variant="${ALL_TARGETS[$((i + 1))]}"
 
         if [[ -n "$only_target" && "$target" != "$only_target" ]]; then
             continue
@@ -521,17 +552,17 @@ main() {
 
     cleanup_caches
 
-    echo
-    echo ">>> all requested builds complete"
-    echo ">>> built images:"
+    printf '\n'
+    printf '%s\n' ">>> all requested builds complete"
+    printf '%s\n' ">>> built images:"
     docker images --filter "reference=${PUBLIC_REGISTRY}/${PUBLIC_REPO}/*nonfree*${FFVER}*" \
         --format "    {{.Repository}}:{{.Tag}}  ({{.Size}})" || true
-    echo
-    echo ">>> ffmpeg binaries:"
-    find .cache/ffbuild-output -name ffmpeg -o -name ffmpeg.exe 2>/dev/null \
+    printf '\n'
+    printf '%s\n' ">>> ffmpeg binaries:"
+    find .cache/ffbuild-output -type f \( -name ffmpeg -o -name ffmpeg.exe \) 2>/dev/null \
         | sed 's/^/    /' || true
-    echo
-    echo ">>> artifacts:"
+    printf '\n'
+    printf '%s\n' ">>> artifacts:"
     # shellcheck disable=SC2012  # human-readable summary; ls -lh sizes are the point
     ls -lh artifacts/*.{zip,tar.xz} 2>/dev/null | sed 's/^/    /' || true
 }

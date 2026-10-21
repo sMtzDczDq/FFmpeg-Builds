@@ -1,30 +1,44 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+#
+# install.sh — copy an unpacked FFmpeg prefix into a destination prefix.
+#
+# Usage: install.sh INDIR OUTDIR
+#
+set -euo pipefail
+IFS=$'\n\t'
 
-if [[ "$#" != 2 ]]; then
-	printf 'Usage: install.sh INDIR OUTDIR\n'
-	exit 1
+if (( $# != 2 )); then
+    printf 'Usage: install.sh INDIR OUTDIR\n'
+    exit 1
 fi
 
-IN="$1"
-OUT="$2"
+INDIR="$1"
+OUTDIR="$2"
 
-mkdir -p "${OUT}"/bin || exit 1
-cp "${IN}"/bin/* "${OUT}"/bin || exit 1
+mkdir -p "${OUTDIR}/bin"
+cp "${INDIR}"/bin/* "${OUTDIR}"/bin
 
-mkdir -p "${OUT}"/lib || exit 1
-cp -a "${IN}"/lib/*.so* "${OUT}"/lib || exit 1
+mkdir -p "${OUTDIR}/lib"
+cp -a "${INDIR}"/lib/*.so* "${OUTDIR}"/lib
 
-mkdir -p "${OUT}"/lib/pkgconfig || exit 1
-cp -a "${IN}"/lib/pkgconfig/*.pc "${OUT}"/lib/pkgconfig || exit 1
+mkdir -p "${OUTDIR}/lib/pkgconfig"
+cp -a "${INDIR}"/lib/pkgconfig/*.pc "${OUTDIR}"/lib/pkgconfig
 
-mkdir -p "${OUT}"/include || exit 1
-cp -r "${IN}"/include/* "${OUT}"/include || exit 1
+mkdir -p "${OUTDIR}/include"
+cp -a "${INDIR}"/include/* "${OUTDIR}"/include
 
-mkdir -p "${OUT}"/doc || exit 1
-cp -r "${IN}"/doc/* "${OUT}"/doc || exit 1
+mkdir -p "${OUTDIR}/doc"
+cp -a "${INDIR}"/doc/* "${OUTDIR}"/doc
 
-mkdir -p "${OUT}/man" || exit 1
-cp -r "${IN}"/man/* "${OUT}"/man || exit 1
+mkdir -p "${OUTDIR}/man"
+cp -a "${INDIR}"/man/* "${OUTDIR}"/man
 
-ldconfig
+# Refresh the dynamic linker cache. Only root can write /etc/ld.so.cache, and
+# it is only useful when installing into a system library directory, so skip it
+# otherwise instead of failing with a confusing permission error.
+if (( EUID == 0 )); then
+    ldconfig
+else
+    printf 'Note: not running as root, skipping ldconfig.\n'
+    printf '      Add %s/lib to your linker search path if the libraries are not found.\n' "$OUTDIR"
+fi

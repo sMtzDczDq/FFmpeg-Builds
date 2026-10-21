@@ -25,6 +25,7 @@
 #   - Disk: budget ~50 GB for .cache/ across a full four-image run.
 
 set -euo pipefail
+IFS=$'\n\t'
 cd "$(dirname "$0")"
 
 BUILDER_NAME="ffbuilder"
@@ -35,29 +36,30 @@ PUBLIC_REPO="btbn/ffmpeg-builds"
 # Order chosen so each target's cache pull from a similar published cache
 # gives the most hits. Shared builds first (matching gpl-shared:cache),
 # static builds after (matching gpl:cache).
+# Flat list of target/variant pairs, consumed two at a time.
 ALL_TARGETS=(
-    "linux64 nonfree-shared"
-    "win64   nonfree-shared"
-    "linux64 nonfree"
-    "win64   nonfree"
+    linux64   nonfree-shared
+    win64     nonfree-shared
+    linux64   nonfree
+    win64     nonfree
 )
 
 detect_parallelism() {
     local n
-    n="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 2)"
+    n="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || printf '%s\n' 2)"
     # Cap at a sensible value; 16 is plenty for FFmpeg dep builds.
-    if [[ "$n" -gt 16 ]]; then n=16; fi
-    echo "$n"
+    if (( n > 16 )); then n=16; fi
+    printf '%s\n' "$n"
 }
 
 create_builder() {
     if docker buildx inspect "$BUILDER_NAME" >/dev/null 2>&1; then
-        echo ">>> buildx builder '$BUILDER_NAME' already exists, reusing"
+        printf '%s\n' ">>> buildx builder '$BUILDER_NAME' already exists, reusing"
         return 0
     fi
 
     local parallelism="${FAST3_PARALLELISM:-$(detect_parallelism)}"
-    echo ">>> creating buildx builder '$BUILDER_NAME' (parallelism=$parallelism)"
+    printf '%s\n' ">>> creating buildx builder '$BUILDER_NAME' (parallelism=$parallelism)"
 
     # Build a per-instance buildkit config so we don't have to edit the
     # repo-tracked file. The original .github/buildkit.toml caps at 2 which
@@ -95,13 +97,13 @@ EOF
 }
 
 pull_bases() {
-    echo ">>> pulling published base images (skips crosstool-NG / mingw rebuild)"
+    printf '%s\n' ">>> pulling published base images (skips crosstool-NG / mingw rebuild)"
     if ! docker pull "${PUBLIC_REGISTRY}/${PUBLIC_REPO}/base-linux64:latest"; then
-        echo "    WARNING: failed to pull base-linux64. If you are behind an"
-        echo "    auth proxy, run 'docker login ghcr.io' and retry."
+        printf '%s\n' "    WARNING: failed to pull base-linux64. If you are behind an"
+        printf '%s\n' "    auth proxy, run 'docker login ghcr.io' and retry."
     fi
     if ! docker pull "${PUBLIC_REGISTRY}/${PUBLIC_REPO}/base-win64:latest"; then
-        echo "    WARNING: failed to pull base-win64."
+        printf '%s\n' "    WARNING: failed to pull base-win64."
     fi
 }
 
@@ -109,11 +111,11 @@ pull_bases() {
 check_disk() {
     local need_kb=30000000  # ~30 GB
     local avail_kb
-    avail_kb="$(df -Pk "${PWD}/.cache" 2>/dev/null | awk 'NR==2 {print $4}')"
+    avail_kb="$(df -Pk "${PWD}/.cache" 2>/dev/null | awk 'NR==2 {print $4}' || true)"
     if [[ -z "$avail_kb" ]]; then return 0; fi
     if (( avail_kb < need_kb )); then
-        echo ">>> WARNING: only ${avail_kb} KB free in $(dirname "${PWD}/.cache")"
-        echo "    (recommended: >= $((need_kb/1000000)) GB). Continuing anyway."
+        printf '%s\n' ">>> WARNING: only ${avail_kb} KB free in $(dirname "${PWD}/.cache")"
+        printf '%s\n' "    (recommended: >= $((need_kb/1000000)) GB). Continuing anyway."
     fi
 }
 
@@ -123,11 +125,11 @@ check_disk() {
 # use the pulled base images via --build-context. NOCLEAN keeps the
 # buildkit builder and .cache/images around between iterations.
 build_one() {
-    local target=$1 variant=$2
-    echo
-    echo "============================================================"
-    echo "  Building: ${target} ${variant} (FFmpeg ${FFVER})"
-    echo "============================================================"
+    local target="$1" variant="$2"
+    printf '\n'
+    printf '%s\n' "============================================================"
+    printf '%s\n' "  Building: ${target} ${variant} (FFmpeg ${FFVER})"
+    printf '%s\n' "============================================================"
 
     QUICKBUILD=1 NOCLEAN=1 \
         ./makeimage.sh "$target" "$variant" "$FFVER"
@@ -135,10 +137,10 @@ build_one() {
 
 cleanup_caches() {
     if [[ "${FAST3_KEEP_CACHES:-1}" == "1" ]]; then
-        echo ">>> leaving .cache/ in place (FAST3_KEEP_CACHES=1)"
+        printf '%s\n' ">>> leaving .cache/ in place (FAST3_KEEP_CACHES=1)"
         return 0
     fi
-    echo ">>> removing .cache/images and the buildkit builder"
+    printf '%s\n' ">>> removing .cache/images and the buildkit builder"
     rm -rf "${PWD}/.cache/images" || true
     docker buildx rm -f "$BUILDER_NAME" 2>/dev/null || true
 }
@@ -156,10 +158,10 @@ main() {
     # via its argv form, but the env var is harmless and useful for logs.
     export FFVER
 
-    for entry in "${ALL_TARGETS[@]}"; do
-        # shellcheck disable=SC2086
-        set -- $entry
-        local target=$1 variant=$2
+    local -i i
+    for ((i = 0; i < ${#ALL_TARGETS[@]}; i += 2)); do
+        local target="${ALL_TARGETS[$i]}"
+        local variant="${ALL_TARGETS[$((i + 1))]}"
 
         if [[ -n "$only_target" && "$target" != "$only_target" ]]; then
             continue
@@ -173,9 +175,9 @@ main() {
 
     cleanup_caches
 
-    echo
-    echo ">>> all requested builds complete"
-    echo ">>> built images:"
+    printf '\n'
+    printf '%s\n' ">>> all requested builds complete"
+    printf '%s\n' ">>> built images:"
     docker images --filter "reference=${PUBLIC_REGISTRY}/${PUBLIC_REPO}/*nonfree*${FFVER}*" \
         --format "    {{.Repository}}:{{.Tag}}  ({{.Size}})" || true
 }

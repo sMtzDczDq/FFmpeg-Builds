@@ -52,7 +52,35 @@ name and for cloning the `release/9.0` git branch. Pin an older branch with
   (`ffmpeg`, plus `ffplay`/`ffprobe`, or `.exe` on Windows).
 - **Download packages**: `artifacts/` in the repo root, named
   `ffmpeg-<version>-<target>-<variant>.tar.xz` (Linux) or `.zip` (Windows).
+  The directory *inside* the archive is shortened to the plain version
+  (e.g. `ffmpeg-n9.0.2/`), and the Linux packages also contain an `install.sh`
+  that installs the build into `/usr/local`.
 - **Images**: tagged `ghcr.io/btbn/ffmpeg-builds/<target>-<variant>:<version>`.
+
+## Installing the Linux packages
+
+The Linux archives contain an `install.sh` that drops the build into
+`/usr/local`:
+
+```sh
+tar xf artifacts/ffmpeg-n9.0.2-3-gabc1234-linux64-nonfree-shared.tar.xz
+cd ffmpeg-n9.0.2
+sudo ./install.sh
+```
+
+It puts the executables in `/usr/local/bin`, the libraries in
+`/usr/local/lib`, the headers in `/usr/local/include`, the pkg-config files
+in `/usr/local/lib/pkgconfig` and the documentation, man pages and presets
+in `/usr/local/share`. Set `PREFIX` to install somewhere else:
+
+```sh
+PREFIX=/opt/ffmpeg sudo -E ./install.sh
+```
+
+The same script handles the static and the shared package. For the shared
+one it also refreshes the linker cache (`ldconfig`) when the prefix is a
+system one such as `/usr/local`, so the new libraries are picked up
+immediately.
 
 ## Steps, top to bottom
 
@@ -86,7 +114,9 @@ name and for cloning the `release/9.0` git branch. Pin an older branch with
      (`.cache/ffbuild-output/<target>-<variant>`).
    - **Package it** — copy that `prefix` into a staging folder, then create
      a `tar.xz` (Linux) or `zip` (Windows) under `artifacts/`, using a
-     name like `ffmpeg-n9.0.2-3-gabc1234-linux64-nonfree.tar.xz`.
+     name like `ffmpeg-n9.0.2-3-gabc1234-linux64-nonfree.tar.xz`. The
+     directory inside the archive is named after the version alone
+     (`ffmpeg-n9.0.2/`). On Linux the package also gets an `install.sh`.
 6. **Clean up** — unless told otherwise (see env vars), it keeps `.cache/`
    and the builder around so the next run is even faster.
 7. At the end it prints a summary of the built images, binaries and archives.
