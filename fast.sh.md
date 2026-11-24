@@ -42,9 +42,16 @@ Four combinations, driven by a list inside the script:
 
 By default it builds the **newest released FFmpeg**: it reads the release
 listing on ffmpeg.org, picks the highest version, and reduces it to its
-release branch (e.g. `9.0.2` → `9.0`), which it uses both for the base image
-name and for cloning the `release/9.0` git branch. Pin an older branch with
-`FAST_FFVER=9.0 ./fast.sh` if you ever need to.
+release branch (e.g. `9.0.2` → `9.0`, `9.1` → `9.1`), which it uses both for the
+prebuilt dependency base image name and for cloning the `release/<version>` git
+branch. Pin a specific branch with `FAST_FFVER=9.1 ./fast.sh`.
+
+If BtbN has not published dependency base images for that branch yet, you can
+reuse the master dependency images while still building the release branch:
+
+```sh
+FAST_FFVER=9.1 FAST_BASE=master ./fast.sh
+```
 
 ## Outputs
 
@@ -94,16 +101,20 @@ immediately.
 
 1. **Pick the FFmpeg version** — reads the newest release on ffmpeg.org
    (or uses `FAST_FFVER` if set) and reduces it to its release branch.
+   `FAST_BASE` selects the prebuilt dependency image slug (defaults to
+   `FAST_FFVER`; set `FAST_BASE=master` to use the unversioned master deps).
+   `FAST_GIT_BRANCH` overrides the FFmpeg git branch when needed.
 2. **Check disk space** — wants ~20 GB free (just warns if not enough).
 3. **Prepare Docker's build tool** ("buildx builder"). Reuses it if already
    there; otherwise creates one. By default it caps the parallel workloads at
    4 unless you override with an env var. Warning for macOS users: pass
    `FAST_NO_HOST_NET=1` if your Docker setup rejects the default host
    networking mode.
-4. **Download the two base images** — `linux64-gpl-shared-<version>` and
-   `win64-gpl-shared-<version>` from `ghcr.io/btbn/ffmpeg-builds`. These
-   contain all ~120 libraries. If BtbN hasn't published that version yet,
-   it stops early and tells you to pin an older one with `FAST_FFVER`.
+4. **Download the two base images** — `linux64-gpl-shared-<base>` and
+   `win64-gpl-shared-<base>` from `ghcr.io/btbn/ffmpeg-builds` (or the
+   unversioned `*-gpl-shared:latest` when `FAST_BASE=master`). These contain
+   all ~120 libraries. If BtbN hasn't published that base yet, it stops early
+   and tells you to point at a published base with `FAST_BASE=master`.
    Hint: if the download fails, it suggests `docker login ghcr.io` first.
    (Name quirk: the FFmpeg version is part of the image *name*, not the tag —
    every image shares the `:latest` tag.)
@@ -132,10 +143,11 @@ immediately.
 ## Usage
 
 ```sh
-./fast.sh                        # build the newest release, all four combinations
-./fast.sh linux64                # only the two linux64 builds
-./fast.sh win64 nonfree-shared   # just one target + variant
-FAST_FFVER=9.0 ./fast.sh         # pin an older (already-published) branch
+./fast.sh                                  # build the newest release, all four combinations
+./fast.sh linux64                          # only the two linux64 builds
+./fast.sh win64 nonfree-shared             # just one target + variant
+FAST_FFVER=9.0 ./fast.sh                   # pin an older (already-published) branch
+FAST_FFVER=9.1 FAST_BASE=master ./fast.sh  # build release/9.1 using master deps
 ```
 
 ## Settings (env vars)
@@ -143,6 +155,8 @@ FAST_FFVER=9.0 ./fast.sh         # pin an older (already-published) branch
 | Variable                   | Effect                                                             |
 |----------------------------|--------------------------------------------------------------------|
 | `FAST_FFVER=x.y`           | Pin the FFmpeg release branch (default: auto-detect newest from ffmpeg.org). |
+| `FAST_BASE=slug`           | Pin the prebuilt gpl-shared dependency base image slug (default: `FAST_FFVER`; use `master` for the unversioned master base). |
+| `FAST_GIT_BRANCH=name`     | Override the FFmpeg git branch (default: `release/${FAST_FFVER}`, or `master` when `FAST_FFVER=master`). |
 | `FAST_NO_HOST_NET=1`      | Skip the `network=host` Docker option — needed on macOS Docker Desktop / Lima / Colima style setups. |
 | `FAST_PARALLELISM=N`      | Override the amount of parallel work (default: capped at 4).       |
 | `FAST_KEEP_CACHES=0`      | Delete `.cache/` and the builder when done (default is to keep them). |

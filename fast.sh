@@ -27,12 +27,15 @@
 #   No 30-60 min crosstool-NG rebuild, no 120 dep rebuilds.
 #
 # Usage:
-#   ./fast.sh                      # all four targets
-#   ./fast.sh linux64              # only the linux64 pair
-#   ./fast.sh win64 nonfree-shared # one specific target+variant
+#   ./fast.sh                                  # all four targets
+#   ./fast.sh linux64                          # only the linux64 pair
+#   ./fast.sh win64 nonfree-shared             # one specific target+variant
+#   FAST_FFVER=9.1 FAST_BASE=master ./fast.sh  # build release/9.1 on master deps
 #
 # Env vars:
 #   FAST_FFVER=x.y            Pin the FFmpeg release branch (default: detect newest from ffmpeg.org).
+#   FAST_BASE=slug            Pin the prebuilt gpl-shared base image slug (default: FAST_FFVER; use "master" for the unversioned master base image).
+#   FAST_GIT_BRANCH=name      Override the FFmpeg git branch (default: release/${FAST_FFVER}, or master when FAST_FFVER=master).
 #   FAST_NO_HOST_NET=1        Skip --driver-opt network=host.
 #   FAST_PARALLELISM=N        Override buildkit max-parallelism (cap 4).
 #   FAST_KEEP_CACHES=0        Delete .cache/ and the builder on exit.
@@ -56,6 +59,8 @@ cd "$(dirname "$0")"
 
 BUILDER_NAME="ffbuilder"
 FFVER="9.0"  # fallback only — normally auto-detected in main()
+BASE_SLUG="" # resolved in main(); defaults to FFVER
+FFMPEG_GIT_BRANCH="" # resolved in main(); defaults to release/${FFVER}
 PUBLIC_REGISTRY="ghcr.io"
 PUBLIC_REPO="btbn/ffmpeg-builds"
 
@@ -73,12 +78,12 @@ ALL_TARGETS=(
 
 # Map (target,variant) -> base gpl-shared image ref to pull from ghcr.io.
 # BtbN's published naming is `<target>-<variant>-<ffver>:latest`, e.g.
-# `linux64-gpl-shared-9.0:latest`. The FFmpeg version is part of the
-# image NAME, not the tag — every variant shares the `:latest` tag.
+# `linux64-gpl-shared-9.0:latest`, while master uses
+# `<target>-<variant>:latest`. The FFmpeg version is part of the image
+# NAME, not the tag — every variant shares the `:latest` tag.
 # All four nonfree variants share a single gpl-shared base per target —
 # the difference is just the configure flags, baked into the overlay.
-# GPL_BASE is populated in main() once FFVER has been resolved, since its
-# values embed ${FFVER}.
+# GPL_BASE is populated in main() once BASE_SLUG has been resolved.
 declare -A GPL_BASE=()
 
 detect_parallelism() {
@@ -147,8 +152,8 @@ ffver_ge() {
 }
 
 # Query ffmpeg.org's release listing for the newest FFmpeg release and
-# reduce it to the release-branch version that BtbN bakes into its image
-# names and upstream uses for the `release/x.y` git branch: 9.0.2 -> 9.0.
+# reduce it to the release-branch version that upstream uses for the
+# `release/x.y` git branch: 9.0.2 -> 9.0, 9.1 -> 9.1.
 detect_latest_ffver() {
     local HTML V VER=""
     local -a VERSIONS=()
@@ -169,43 +174,56 @@ detect_latest_ffver() {
         if ffver_ge "$V" "$VER"; then VER="$V"; fi
     done
 
-    # 9.0.2 -> 9.0 ; 10.0 -> 10.0 (strip any patch number).
-    printf '%s\n' "${VER%.*}"
+    # 9.0.2 -> 9.0 ; 9.1 -> 9.1 ; 10.0 -> 10.0 (strip any patch number).
+    if [[ "$VER" =~ ^([0-9]+\.[0-9]+)\.[0-9]+$ ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+    else
+        printf '%s\n' "$VER"
+    fi
 }
 
-# The fast lane can only build branches BtbN already publishes (the version
-# is baked into the published image NAME, so there's no way to build an
-# unreleased branch). Verify both target bases exist before burning hours.
+base_image_name() {
+    local TARGET="$1"
+    if [[ -n "$BASE_SLUG" && "$BASE_SLUG" != "master" ]]; then
+        printf '%s\n' "${TARGET}-gpl-shared-${BASE_SLUG}:latest"
+    else
+        printf '%s\n' "${TARGET}-gpl-shared:latest"
+    fi
+}
+
+# The fast lane can only build branches whose dependency base images BtbN
+# already publishes. Verify both target bases exist before burning hours.
 check_base_images() {
-    local T FOUND=1
+    local T IMG FOUND=1
     for T in linux64 win64; do
+        IMG="$(base_image_name "$T")"
         if docker buildx imagetools inspect \
-            "${PUBLIC_REGISTRY}/${PUBLIC_REPO}/${T}-gpl-shared-${FFVER}:latest" \
+            "${PUBLIC_REGISTRY}/${PUBLIC_REPO}/${IMG}" \
             >/dev/null 2>&1; then
-            echo ">>> base image available: ${T}-gpl-shared-${FFVER}:latest"
+            echo ">>> base image available: ${IMG}"
         else
-            echo "    WARNING: ${T}-gpl-shared-${FFVER}:latest not on the registry"
+            echo "    WARNING: ${IMG} not on the registry"
             echo "    (BtbN may not have published that branch yet, or you're offline)."
             FOUND=0
         fi
     done
     if (( ! FOUND )); then
-        echo "    The fast lane can only build FFmpeg branches BtbN already publishes."
-        echo "    Wait for BtbN's CI, or pin a published branch: FAST_FFVER=9.0 ./fast.sh"
+        echo "    The fast lane can only build on published gpl-shared dependency images."
+        echo "    Wait for BtbN's CI, or point at a published base: FAST_BASE=master ./fast.sh"
         exit 1
     fi
 }
 
 # Pull both gpl-shared base images once. Skipped silently if already present.
 # These are the bulk of the speedup — all 120 deps live in these layers.
-# BtbN's naming is `<target>-<variant>-<ffver>:latest` (version in the NAME,
-# not the tag — every variant shares the `:latest` tag), per
-# .github/workflows/build.yml:264,289.
+# BtbN's naming is `<target>-<variant>-<ffver>:latest` for release bases
+# and `<target>-<variant>:latest` for master, per
+# .github/workflows/build.yml:366-371,386-398.
 pull_gpl_bases() {
-    local REF
-    for REF in \
-        "${PUBLIC_REGISTRY}/${PUBLIC_REPO}/linux64-gpl-shared-${FFVER}:latest" \
-        "${PUBLIC_REGISTRY}/${PUBLIC_REPO}/win64-gpl-shared-${FFVER}:latest"; do
+    local T IMG REF
+    for T in linux64 win64; do
+        IMG="$(base_image_name "$T")"
+        REF="${PUBLIC_REGISTRY}/${PUBLIC_REPO}/${IMG}"
         echo ">>> pulling $REF"
         if ! docker pull "$REF"; then
             echo "    WARNING: failed to pull $REF."
@@ -247,62 +265,65 @@ check_disk() {
     fi
 }
 
-# Build the FF_CONFIGURE flags for a given nonfree variant. Starts from the
-# gpl-shared defaults used by BtbN's published image (so we match the
-# dependency set that's already installed in the base), then adds --enable-
-# nonfree and --enable-libfdk-aac.
+# Build the FF_CONFIGURE flags for a given nonfree variant. Prefer the base
+# image's own FF_CONFIGURE to avoid drift as BtbN updates dependency sets,
+# then adjust shared/static and add nonfree fdk-aac.
 build_ff_configure() {
-    local TARGET="$1" VARIANT="$2"
+    local TARGET="$1" VARIANT="$2" BASE_REF="$3"
     local CFG
 
-    # Common gpl-shared flags — must match what's in BtbN's published
-    # linux64-gpl-shared-${FFVER} / win64-gpl-shared-${FFVER} image (i.e.
-    # the resolved release branch) so the deps it already has satisfy
-    # ./configure.
-    CFG="--enable-gpl --enable-version3 --disable-debug --disable-w32threads --enable-pthreads"
-    CFG+=" --enable-iconv --enable-zlib --enable-libxml2 --enable-libvmaf"
-    CFG+=" --enable-fontconfig --enable-libharfbuzz --enable-libfreetype --enable-libfribidi"
-    CFG+=" --enable-vulkan --enable-libvorbis --disable-libxcb --disable-xlib"
-    CFG+=" --disable-libpulse --enable-gmp --enable-lzma --enable-liblcevc-dec"
-    CFG+=" --enable-opencl --enable-amf --enable-libaom --enable-libaribb24"
-    CFG+=" --enable-avisynth --enable-chromaprint --enable-libdav1d --enable-libdavs2"
-    CFG+=" --enable-libdvdread --enable-libdvdnav --enable-ffnvcodec --enable-cuda-llvm"
-    CFG+=" --enable-frei0r --enable-libgme --enable-libkvazaar --enable-libaribcaption"
-    CFG+=" --enable-libass --enable-libbluray --enable-libjxl --enable-libmp3lame"
-    CFG+=" --enable-libopus --enable-libplacebo --enable-librist --enable-libssh"
-    CFG+=" --enable-libtheora --enable-libvpx --enable-libwebp --enable-libzmq"
-    CFG+=" --enable-lv2 --enable-libvpl --enable-openal --enable-liboapv"
-    CFG+=" --enable-libopencore-amrnb --enable-libopencore-amrwb --enable-libopenh264"
-    CFG+=" --enable-libopenjpeg --enable-libopenmpt --enable-librav1e"
-    CFG+=" --enable-librubberband --enable-sdl2 --enable-libsnappy"
-    CFG+=" --enable-libsoxr --enable-libsrt --enable-libsvtav1 --enable-libtwolame"
-    CFG+=" --enable-libuavs3d --disable-libdrm --enable-libvidstab"
-    CFG+=" --enable-libvvenc --disable-whisper --enable-libx264 --enable-libx265"
-    CFG+=" --enable-libxavs2 --enable-libxvid --enable-libzimg --enable-libzvbi"
+    CFG="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$BASE_REF" 2>/dev/null \
+        | sed -n 's/^FF_CONFIGURE=//p' | head -1 || true)"
 
-    # Nonfree additions.
-    CFG+=" --enable-nonfree --enable-libfdk-aac"
+    if [[ -z "$CFG" ]]; then
+        # Fallback: conservative static config matching common gpl-shared deps.
+        CFG="--enable-gpl --enable-version3 --disable-debug --disable-w32threads --enable-pthreads"
+        CFG+=" --enable-iconv --enable-zlib --enable-libxml2 --enable-libvmaf"
+        CFG+=" --enable-fontconfig --enable-libharfbuzz --enable-libfreetype --enable-libfribidi"
+        CFG+=" --enable-vulkan --enable-libvorbis --disable-libxcb --disable-xlib"
+        CFG+=" --disable-libpulse --enable-gmp --enable-lzma --enable-liblcevc-dec"
+        CFG+=" --enable-opencl --enable-amf --enable-libaom --enable-libaribb24"
+        CFG+=" --enable-avisynth --enable-chromaprint --enable-libdav1d --enable-libdavs2"
+        CFG+=" --enable-libdvdread --enable-libdvdnav --enable-ffnvcodec --enable-cuda-llvm"
+        CFG+=" --enable-frei0r --enable-libgme --enable-libkvazaar --enable-libaribcaption"
+        CFG+=" --enable-libass --enable-libbluray --enable-libjxl --enable-libmp3lame"
+        CFG+=" --enable-libopus --enable-libplacebo --enable-librist --enable-libssh"
+        CFG+=" --enable-libtheora --enable-libvpx --enable-libwebp --enable-libzmq"
+        CFG+=" --enable-lv2 --enable-libvpl --enable-openal --enable-liboapv"
+        CFG+=" --enable-libopencore-amrnb --enable-libopencore-amrwb --enable-libopenh264"
+        CFG+=" --enable-libopenjpeg --enable-libopenmpt --enable-librav1e"
+        CFG+=" --enable-librubberband --enable-sdl2 --enable-libsnappy"
+        CFG+=" --enable-libsoxr --enable-libsrt --enable-libsvtav1 --enable-libtwolame"
+        CFG+=" --enable-libuavs3d --disable-libdrm --enable-libvidstab"
+        CFG+=" --enable-libvvenc --disable-whisper --enable-libx264 --enable-libx265"
+        CFG+=" --enable-libxavs2 --enable-libxvid --enable-libzimg --disable-libzvbi"
+        if [[ "$TARGET" == linux* ]]; then
+            CFG+=" --enable-openssl --enable-vaapi"
+        else
+            CFG+=" --enable-schannel"
+        fi
+    fi
 
-    # Static vs shared. For the "nonfree" variant we want static ffmpeg,
-    # matching gpl (the gpl-shared image's deps support both).
+    # Normalize shared/static based on requested variant.
+    CFG=" $CFG "
+    CFG="${CFG// --enable-shared / }"
+    CFG="${CFG// --disable-shared / }"
+    CFG="${CFG// --enable-static / }"
+    CFG="${CFG// --disable-static / }"
     if [[ "$VARIANT" == *-shared ]]; then
         CFG+=" --enable-shared --disable-static"
     else
         CFG+=" --disable-shared --enable-static"
     fi
 
-    # Target-specific TLS backend / VA-API. schannel is Windows-only
-    # (scripts.d/50-schannel.sh) and vaapi + openssl are the Linux answers
-    # (scripts.d/50-vaapi, scripts.d/25-openssl.sh). BtbN's gpl-shared image
-    # ships openssl+vaapi on linux64 and schannel on win64, so enable each
-    # only where its dep actually exists.
-    if [[ "$TARGET" == linux* ]]; then
-        CFG+=" --enable-openssl --enable-vaapi"
-    else
-        CFG+=" --enable-schannel"
-    fi
+    # Nonfree additions. Replace base disable with enable where needed.
+    CFG="${CFG// --disable-libfdk-aac / }"
+    CFG="${CFG// --enable-libfdk-aac / }"
+    CFG="${CFG// --enable-nonfree / }"
+    CFG+=" --enable-nonfree --enable-libfdk-aac"
 
-    printf '%s\n' "$CFG"
+    # Collapse whitespace.
+    printf '%s\n' "$CFG" | xargs
 }
 
 # Build the overlay image for a (target, variant). This:
@@ -322,12 +343,12 @@ build_overlay() {
     local DOCKERFILE=".cache/Dockerfile.nonfree.${TARGET}-${VARIANT}"
     local FF_CFG
 
-    FF_CFG="$(build_ff_configure "$TARGET" "$VARIANT")"
+    FF_CFG="$(build_ff_configure "$TARGET" "$VARIANT" "${PUBLIC_REGISTRY}/${PUBLIC_REPO}/${BASE_REF}")"
 
     mkdir -p .cache
     echo
     echo "============================================================"
-    echo "  Building overlay: ${TARGET} ${VARIANT} (FFmpeg ${FFVER})"
+    echo "  Building overlay: ${TARGET} ${VARIANT} (FFmpeg ${FFVER}, base ${BASE_SLUG})"
     echo "  Base: ${PUBLIC_REGISTRY}/${PUBLIC_REPO}/${BASE_REF}"
     echo "  Tag:  ${OVERLAY_TAG}"
     echo "============================================================"
@@ -361,15 +382,10 @@ RUN --mount=src=.cache/fdk-aac-src,dst=/src,rw \
     true
 
 # Bake the FFmpeg configure flags. Static vs shared is already encoded in
-# FF_CONFIGURE. FF_CFLAGS/FF_LDFLAGS/FF_LIBS match what upstream uses in
-# the generated Dockerfile for the equivalent nonfree variant.
+# FF_CONFIGURE. Keep the base image's FF_* env to avoid drifting from
+# upstream dependency/toolchain settings.
 ENV FF_CONFIGURE="${FF_CFG}" \\
-    FF_CFLAGS="-DLIBTWOLAME_STATIC" \\
-    FF_CXXFLAGS="" \\
-    FF_LDFLAGS="-pthread" \\
-    FF_LDEXEFLAGS="" \\
-    FF_LIBS="-lgomp" \\
-    GIT_BRANCH="release/${FFVER}"
+    GIT_BRANCH="${FFMPEG_GIT_BRANCH}"
 EOF
 
     docker buildx --builder "$BUILDER_NAME" build \
@@ -393,7 +409,12 @@ run_ffmpeg_build() {
     echo ">>> building ffmpeg inside $OVERLAY_TAG"
 
     # Pick the right FFmpeg branch matching the addin.
-    local GIT_BRANCH="release/${FFVER}"
+    local GIT_BRANCH="${FFMPEG_GIT_BRANCH}"
+
+    local RPATH_LDEXEFLAGS=""
+    if [[ "$TARGET" == linux* && "$VARIANT" == *shared* ]]; then
+        RPATH_LDEXEFLAGS=' -Wl,-rpath,\\\$ORIGIN/../lib'
+    fi
 
     cat >"$BUILD_SCRIPT" <<EOF
 #!/usr/bin/env bash
@@ -406,10 +427,10 @@ cd ffmpeg
 
 ./configure --prefix=/ffbuild/prefix --pkg-config-flags="--static" \$FFBUILD_TARGET_FLAGS \$FF_CONFIGURE \\
     --extra-cflags="\$FF_CFLAGS" --extra-cxxflags="\$FF_CXXFLAGS" --extra-libs="\$FF_LIBS" \\
-    --extra-ldflags="\$FF_LDFLAGS" --extra-ldexeflags="\$FF_LDEXEFLAGS" \\
+    --extra-ldflags="\$FF_LDFLAGS" --extra-ldexeflags="\$FF_LDEXEFLAGS${RPATH_LDEXEFLAGS}" \\
     --cc="\$CC" --cxx="\$CXX" --ar="\$AR" --ranlib="\$RANLIB" --nm="\$NM" \\
     --extra-version="\$(date +%Y%m%d)" || { cat ffbuild/config.log; exit 1; }
-make -j\$(nproc)
+make -j\$(nproc) V=1
 make install install-doc
 EOF
 
@@ -533,9 +554,8 @@ main() {
     mkdir -p .cache
 
     # Resolve which FFmpeg release branch to build. Default: the newest
-    # release on ffmpeg.org reduced to its release branch (9.0.2 -> 9.0),
-    # which is both BtbN's image-name version and upstream's release/x.y
-    # git branch. Pin it explicitly with FAST_FFVER to skip detection.
+    # release on ffmpeg.org reduced to its release branch (9.0.2 -> 9.0,
+    # 9.1 -> 9.1). Pin it explicitly with FAST_FFVER to skip detection.
     if [[ -n "${FAST_FFVER:-}" ]]; then
         FFVER="$FAST_FFVER"
         echo ">>> pinned FFmpeg release branch: ${FFVER} (FAST_FFVER)"
@@ -545,11 +565,28 @@ main() {
         echo ">>> WARNING: couldn't reach ffmpeg.org — using fallback ${FFVER} (set FAST_FFVER to pin)"
     fi
 
+    if [[ -n "${FAST_BASE:-}" ]]; then
+        BASE_SLUG="$FAST_BASE"
+    else
+        BASE_SLUG="$FFVER"
+    fi
+
+    if [[ -n "${FAST_GIT_BRANCH:-}" ]]; then
+        FFMPEG_GIT_BRANCH="$FAST_GIT_BRANCH"
+    elif [[ "$FFVER" == "master" ]]; then
+        FFMPEG_GIT_BRANCH="master"
+    else
+        FFMPEG_GIT_BRANCH="release/${FFVER}"
+    fi
+
+    echo ">>> base image slug: ${BASE_SLUG} (set FAST_BASE=master to use master deps)"
+    echo ">>> FFmpeg git branch: ${FFMPEG_GIT_BRANCH}"
+
     GPL_BASE=(
-        ["linux64 nonfree"]="linux64-gpl-shared-${FFVER}:latest"
-        ["linux64 nonfree-shared"]="linux64-gpl-shared-${FFVER}:latest"
-        ["win64 nonfree"]="win64-gpl-shared-${FFVER}:latest"
-        ["win64 nonfree-shared"]="win64-gpl-shared-${FFVER}:latest"
+        ["linux64 nonfree"]="$(base_image_name linux64)"
+        ["linux64 nonfree-shared"]="$(base_image_name linux64)"
+        ["win64 nonfree"]="$(base_image_name win64)"
+        ["win64 nonfree-shared"]="$(base_image_name win64)"
     )
 
     check_disk
@@ -580,7 +617,7 @@ main() {
     echo
     echo ">>> all requested builds complete"
     echo ">>> built images:"
-    docker images --filter "reference=${PUBLIC_REGISTRY}/${PUBLIC_REPO}/*nonfree*${FFVER}*" \
+    docker images --filter "reference=${PUBLIC_REGISTRY}/${PUBLIC_REPO}/*nonfree*:${FFVER}*" \
         --format "    {{.Repository}}:{{.Tag}}  ({{.Size}})" || true
     echo
     echo ">>> ffmpeg binaries:"
