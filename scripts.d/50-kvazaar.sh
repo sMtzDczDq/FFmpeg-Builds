@@ -1,9 +1,10 @@
 #!/bin/bash
 
 SCRIPT_REPO="https://github.com/ultravideo/kvazaar.git"
-SCRIPT_COMMIT="2b06691bb5844404c0e703f12a5d7b0fee914ec7"
+SCRIPT_COMMIT="ec7562da7f5971f9fa3f984db358371e74bf3c7d"
 
 ffbuild_enabled() {
+    [[ $TARGET != *32 ]] || return -1
     return 0
 }
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 SCRIPT_REPO="https://github.com/PCRE2Project/pcre2.git"
-SCRIPT_COMMIT="09eb19dc1102b34e7557408f33318364cb97d2b0"
+SCRIPT_COMMIT="49d26bca00694ae940adde6d8bd056d8bfc168fa"
 
 ffbuild_enabled() {
     return 0

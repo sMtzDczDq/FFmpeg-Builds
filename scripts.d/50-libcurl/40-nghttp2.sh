@@ -1,7 +1,7 @@
 #!/bin/bash
 
 SCRIPT_REPO="https://github.com/nghttp2/nghttp2.git"
-SCRIPT_COMMIT="19d06e62185d93d2398d85241cdbb460349bfe44"
+SCRIPT_COMMIT="c785bf23f9d77966085ae1b32717f3e8c8d12090"
 
 ffbuild_enabled() {
     return 0
